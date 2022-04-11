@@ -3,3 +3,4 @@ mysql-connector
 simplejson
 rq
 redis
+requests

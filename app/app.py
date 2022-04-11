@@ -1,8 +1,15 @@
+from multiprocessing import connection
 from typing import List, Dict
 import uuid
 import mysql.connector
 import simplejson as json
 from flask import Flask, Response, request
+from redis import Redis
+from rq import Queue
+from worker import send_simple_message
+
+r = Redis(host='redis', port=6379)
+queue = Queue(connection=r)
 
 app = Flask(__name__)
 
@@ -41,9 +48,24 @@ def getTasksDb():
 @app.route('/v1/tasks', methods=['GET'])
 def getTasks() -> str:
     js = json.dumps(getTasksDb())
-    # TODO: make js in required format
-    resp = Response(js, status=200, mimetype='application/json')
+    resp = Response(js, status=200)
     return resp
+
+@app.route('/v1/tasks/<string:key>', methods=['GET'])
+def getByKey(key):
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    query = f'SELECT * FROM tasks WHERE id = "{key}"'
+    cursor.execute(query)
+    result = cursor.fetchall()
+    if result is None:
+        cursor.close()
+        connection.close()
+        return {'error': 'Not Found', 'status': 404}, 404
+    response = json.dumps(result)
+    cursor.close()
+    connection.close()
+    return response, 200
 
 @app.route('/v1/tasks', methods=['POST'])
 def postTasks() -> str:
@@ -56,10 +78,10 @@ def postTasks() -> str:
             is_completed = data['is_completed']
         else:
             is_completed = 0
-        print(title)
-        print(is_completed)
         js = indexDb(task_id, title, is_completed, email)
-        # resp = Response({'id':task_id}, status=201, mimetype='application/json')
+        if is_completed == 1:
+                job = queue.enqueue(send_simple_message, data['email'], title)
+                return {'id':task_id, 'jobId': job.id}, 201
         return {'id':task_id}, 201
     except:
         return {'error': 'Invalid JSON Body', 'status': 400}, 400
@@ -71,14 +93,18 @@ def UpdateByKey(key):
     cursor = connection.cursor(dictionary=True)
     title = data['title']
     try:
-        if 'is_completed' in data.keys():
+        if 'is_completed' in data:
             is_completed = data['is_completed']
-            query = f'UPDATE tasks SET title = {title}, is_completed = {is_completed} WHERE id = {key}'
+            query = f'UPDATE tasks SET title = "{title}", is_completed = {is_completed} WHERE id = "{key}"'
             cursor.execute(query)
+            connection.commit()
+            if is_completed == 1:
+                job = queue.enqueue(send_simple_message, data['email'], title)
+                return {"jobId": job.id}, 200
         else:
-            query = f'UPDATE tasks SET title = {title} WHERE id = {key}'
+            query = f'UPDATE tasks SET title = {title} WHERE id = "{key}"'
             cursor.execute(query)
-        connection.commit()
+            connection.commit()
         cursor.close()
         connection.close()
     except:
@@ -86,6 +112,21 @@ def UpdateByKey(key):
         connection.close()
         return {}, 200
     return {}, 200
+
+@app.route('/v1/tasks/<string:key>/', methods=['DELETE'])
+def DeleteByKey(key):
+    try:
+        connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
+        query = f'DELETE FROM tasks WHERE id = "{key}"'
+        cursor.execute(query)
+        connection.commit()
+        cursor.close()
+        connection.close()
+    except:
+        return {}, 200
+    return {}, 200
+
 
 
 if __name__ == '__main__':
